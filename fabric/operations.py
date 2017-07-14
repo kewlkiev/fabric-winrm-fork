@@ -666,11 +666,11 @@ def _prefix_env_vars(command, local=False):
     path = env.path
     if path:
         if env.path_behavior == 'append':
-            path = '$PATH:\"%s\" ' % path
+            path = '$PATH:\"%s\"' % path
         elif env.path_behavior == 'prepend':
-            path = '\"%s\":$PATH ' % path
+            path = '\"%s\":$PATH' % path
         elif env.path_behavior == 'replace':
-            path = '\"%s\" ' % path
+            path = '\"%s\"' % path
 
         env_vars['PATH'] = path
 
@@ -768,7 +768,7 @@ def _run_command_winrm(command, shell=False, combine_stderr=None,
     wrapped_command = _prefix_commands(_prefix_env_vars_cmd(command), which)
 
     host = env.host
-    port = env.port
+    port = 5985
 
     manager = _noop
     if warn_only:
