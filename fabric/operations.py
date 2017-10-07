@@ -31,7 +31,7 @@ from fabric.utils import (
     warn,
 )
 from fabric.winrm_hack import execute_winrm_command
-
+import base64
 
 def _shell_escape(string):
     """
@@ -56,6 +56,14 @@ class _AttributeString(str):
     @property
     def stdout(self):
         return str(self)
+
+    @property
+    def status_code(self):
+        return str(self)
+
+    # @property
+    # def stderr(self):
+    #     return str(self)
 
 
 class _AttributeList(list):
@@ -403,6 +411,160 @@ def put(local_path=None, remote_path=None, use_sudo=False,
         return ret
 
 
+
+
+@needs_host
+def winrm_put(local_path=None, remote_path=None, use_sudo=False,
+    mirror_local_mode=False, mode=None):
+    """
+    Examples::
+
+        put('bin/project.zip', '/tmp/project.zip')
+        put('*.py', 'cgi-bin/')
+        put('index.html', 'index.html', mode=0755)
+
+    .. note::
+        If a file-like object such as StringIO has a ``name`` attribute, that
+        will be used in Fabric's printed output instead of the default
+        ``<file obj>``
+    .. versionchanged:: 1.0
+        Now honors the remote working directory as manipulated by
+        `~fabric.context_managers.cd`, and the local working directory as
+        manipulated by `~fabric.context_managers.lcd`.
+    .. versionchanged:: 1.0
+        Now allows file-like objects in the ``local_path`` argument.
+    .. versionchanged:: 1.0
+        Directories may be specified in the ``local_path`` argument and will
+        trigger recursive uploads.
+    .. versionchanged:: 1.0
+        Return value is now an iterable of uploaded remote file paths which
+        also exhibits the ``.failed`` and ``.succeeded`` attributes.
+    .. versionchanged:: 1.5
+        Allow a ``name`` attribute on file-like objects for log output
+    """
+    # Handle empty local path
+    local_path = local_path or os.getcwd()
+
+    # Test whether local_path is a path or a file-like object
+    local_is_path = not (hasattr(local_path, 'read') \
+        and callable(local_path.read))
+
+
+
+    if local_is_path:
+        # Expand local paths
+        local_path = os.path.expanduser(local_path)
+        # Honor lcd() where it makes sense
+        if not os.path.isabs(local_path) and env.lcwd:
+            local_path = os.path.join(env.lcwd, local_path)
+
+        # Glob local path
+        names = glob(local_path)
+    else:
+        names = [local_path]
+
+    # Make sure local arg exists
+    if local_is_path and not names:
+        err = "'%s' is not a valid local path or glob." % local_path
+        raise ValueError(err)
+
+
+    # Iterate over all given local files
+    remote_paths = []
+    failed_local_paths = []
+    for lpath in names:
+        try:
+            if local_is_path and os.path.isdir(lpath):
+                p = put_dir(local_path, remote_path)
+                remote_paths.extend(p)
+                #todo: for directory need implementation
+            else:
+                p = put_file(local_path, remote_path)
+                remote_paths.append(p)
+        except Exception, e:
+            msg = "put() encountered an exception while uploading '%s'"
+            failure = lpath if local_is_path else "<StringIO>"
+            failed_local_paths.append(failure)
+            error(message=msg % lpath, exception=e)
+
+    ret = _AttributeList(remote_paths)
+    ret.failed = failed_local_paths
+    ret.succeeded = not ret.failed
+    return ret
+
+
+
+
+
+
+def put_dir(location,remote):
+    paths= []
+    for dirpath, _, filenames in os.walk(directory):
+        for f in filenames:
+            filepath =  os.path.abspath(os.path.join(dirpath, f))
+            print "FILEPATH:  ",filepath
+            print "REMOTE: ",remote
+            paths.append(put_file(filepath,remote))
+    return paths
+
+
+def put_file( location, remote):
+    step = 1800
+    print "Copying: ", location, ' to ' , remote
+    with open(location,'r') as content_file:
+        contents=content_file.read()
+        noOfparts = len(contents) / step + 1
+        part = 1
+        for i in range(0, len(contents), step):
+            print 'Progress: ',part,'/' , noOfparts
+            part+=1
+            _do_put_file(remote, contents[i:i + step],i)
+            r = _do_put_file(remote, contents[i:i + step],i)
+            if r.status_code == 1:
+                err = r.stdout
+                raise ValueError(err)
+    return remote
+
+
+def _do_put_file(location, contents,count):
+    # adapted/copied from https://github.com/diyan/pywinrm/issues/18
+    if count != 0:
+        ps_script = """
+$filePath = "{location}"
+$s = @" 
+{b64_contents} 
+"@
+$data = [System.Convert]::FromBase64String($s)
+add-content -value $data -encoding byte -path $filePath
+                            """.format(
+                                    location=location,
+                                    b64_contents=base64.b64encode(contents)
+                                )
+    else:
+        ps_script = """
+$filePath = "{location}"
+$s = @" 
+{b64_contents} 
+"@
+$data = [System.Convert]::FromBase64String($s)
+[IO.File]::WriteAllBytes($filePath, $data)
+                            """.format(
+                                    location=location,
+                                    b64_contents=base64.b64encode(contents)
+                                )
+
+    r = _run_command_winrm(ps_script,quiet=True)
+    return r
+    # if r.status_code == 1:
+    #     # self._log.warn(r.std_err)
+    #     return None
+    #
+    # # self._log.debug(r.std_out)
+    #
+    # return r.stdout
+
+
+
 @needs_host
 def get(remote_path, local_path=None):
     """
@@ -704,7 +866,9 @@ def _massage_execution_results(given_command, which, wrapped_command, result_std
     out.failed = False
     out.command = given_command
     out.real_command = wrapped_command
+    # print result_stdout
     if status not in env.ok_ret_codes:
+        print result_stderr
         out.failed = True
         msg = "%s() received nonzero return code %s while executing" % (
             which, status
@@ -768,7 +932,7 @@ def _run_command_winrm(command, shell=False, combine_stderr=None,
     wrapped_command = _prefix_commands(_prefix_env_vars_cmd(command), which)
 
     host = env.host
-    port = 5985
+    port = 5986
 
     manager = _noop
     if warn_only:
@@ -785,8 +949,10 @@ def _run_command_winrm(command, shell=False, combine_stderr=None,
         result_stdout, result_stderr, status = execute_winrm_command(host,
                 wrapped_command, timeout=timeout, port=port)
 
-        return _massage_execution_results(command, which, wrapped_command,
+        r = _massage_execution_results(command, which, wrapped_command,
                 result_stdout, result_stderr, status)
+
+        return r
 
 def _execute(channel, command, pty=True, combine_stderr=None,
     invoke_shell=False, stdout=None, stderr=None, timeout=None):
@@ -910,7 +1076,7 @@ def _execute(channel, command, pty=True, combine_stderr=None,
         if output.running \
             and (output.stdout and stdout_buf and not stdout_buf.endswith("\n")) \
             or (output.stderr and stderr_buf and not stderr_buf.endswith("\n")):
-            print("")
+            print("Still running...")
 
         return stdout_buf, stderr_buf, status
 
